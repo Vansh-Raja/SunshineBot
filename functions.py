@@ -3,6 +3,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import os
+import json
 
 load_dotenv()
 
@@ -13,8 +14,22 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+# Prefer credentials from SERVICE_ACCOUNT_JSON (Railway-friendly). Fallback to file if absent.
+credentials = None
+SERVICE_ACCOUNT_JSON = os.getenv('SERVICE_ACCOUNT_JSON')
+if SERVICE_ACCOUNT_JSON:
+    try:
+        service_info = json.loads(SERVICE_ACCOUNT_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            service_info, scopes=SCOPES
+        )
+    except Exception:
+        credentials = None
+
+if credentials is None:
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
 
 calendar_service = build('calendar', 'v3', credentials=credentials)
 
