@@ -15,9 +15,38 @@ from functions import (
     find_events_by_patient_phone,
     assign_doctor,
     create_appointment_logic,
+    get_db_snapshot,
+    init_db,
+    sync_if_stale,
+    upsert_patient,
+    get_patient_by_phone,
+    get_upcoming_appointments_by_phone,
 )
 
 app = Flask(__name__)
+
+# Ensure SQLite exists and force a fresh sync on startup (Railway is ephemeral)
+try:
+    init_db()
+    # Force immediate sync on boot so debug endpoints and checks have data
+    sync_if_stale(max_age_seconds=0)
+except Exception as _e:
+    # Non-fatal for boot; endpoints can still attempt sync lazily
+    print(f"Startup DB init/sync warning: {_e}")
+
+# Background sync every 60 seconds (best-effort)
+import threading
+import time
+
+def _background_sync_loop():
+    while True:
+        try:
+            sync_if_stale(max_age_seconds=0)
+        except Exception as _e:
+            print(f"Background sync error: {_e}")
+        time.sleep(60)
+
+threading.Thread(target=_background_sync_loop, daemon=True).start()
 
 # All configuration, calendar client, and helper functions are imported from functions.py
 
@@ -35,370 +64,20 @@ def webhook_create_appointment():
     return jsonify(payload), status
 
 # ============================================
-# ENDPOINT 2: CHECK AVAILABILITY
+# GET APPOINTMENTS BY PHONE (UPCOMING)
 # ============================================
 
-@app.route('/api/availability', methods=['GET'])
-def check_availability():
-    """
-    Check available time slots for a date and specialty
-    
-    Query Parameters:
-    - date: YYYY-MM-DD (required)
-    - specialty: cardiology, orthopedics, etc. (optional)
-    
-    Example: /api/availability?date=2025-10-15&specialty=cardiology
-    """
+@app.route('/api/appointments/by-phone', methods=['GET'])
+def appointments_by_phone():
     try:
-        date = request.args.get('date')
-        specialty = request.args.get('specialty', '').lower()
-        
-        if not date:
-            return jsonify({
-                'success': False,
-                'error': 'Date parameter is required (format: YYYY-MM-DD)'
-            }), 400
-        
-        # Validate date format
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid date format. Use YYYY-MM-DD'
-            }), 400
-        
-        # Get available slots
-        available_slots = get_available_slots(date, specialty if specialty else None)
-        
-        # Get doctor info if specialty provided
-        doctors_available = []
-        if specialty and specialty in DOCTORS:
-            doctors_available = DOCTORS[specialty]
-        
-        return jsonify({
-            'success': True,
-            'date': date,
-            'specialty': specialty if specialty else 'all',
-            'available_slots': available_slots,
-            'doctors': doctors_available,
-            'slot_duration_minutes': SLOT_DURATION,
-            'total_available': len(available_slots)
-        }), 200
-        
+        phone = request.args.get('phone')
+        if not phone:
+            return jsonify({'success': False, 'resource_found': False, 'message': 'phone is required', 'data': None}), 400
+        appts = get_upcoming_appointments_by_phone(phone)
+        found = len(appts) > 0
+        return jsonify({'success': True, 'resource_found': found, 'message': 'Appointments fetched', 'data': {'phone': phone, 'appointments': appts, 'total': len(appts)}}), 200
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# ============================================
-# ENDPOINT 3: GET DOCTOR SCHEDULE
-# ============================================
-
-@app.route('/api/schedule', methods=['GET'])
-def get_schedule():
-    """
-    Get the complete schedule for a date range
-    
-    Query Parameters:
-    - start_date: YYYY-MM-DD (required)
-    - end_date: YYYY-MM-DD (optional, defaults to start_date)
-    - doctor: Doctor name filter (optional)
-    
-    Example: /api/schedule?start_date=2025-10-15&end_date=2025-10-20
-    """
-    try:
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date', start_date)
-        doctor_filter = request.args.get('doctor', '')
-        
-        if not start_date:
-            return jsonify({
-                'success': False,
-                'error': 'start_date parameter is required'
-            }), 400
-        
-        # Parse dates
-        start_dt = datetime.strptime(f"{start_date} 00:00", "%Y-%m-%d %H:%M")
-        end_dt = datetime.strptime(f"{end_date} 23:59", "%Y-%m-%d %H:%M")
-        
-        # Get all events in range
-        events = get_events_in_range(start_dt, end_dt)
-        
-        # Format schedule
-        schedule = []
-        for event in events:
-            summary = event.get('summary', '')
-            description = event.get('description', '')
-            
-            # Extract doctor name from summary
-            doctor = ''
-            if '[' in summary and ']' in summary:
-                doctor = summary[summary.find('[')+1:summary.find(']')]
-            
-            # Skip if doctor filter doesn't match
-            if doctor_filter and doctor_filter.lower() not in doctor.lower():
-                continue
-            
-            # Extract patient name
-            patient = summary.replace(f'[{doctor}]', '').strip()
-            
-            start_time = event['start'].get('dateTime', event['start'].get('date'))
-            end_time = event['end'].get('dateTime', event['end'].get('date'))
-            
-            schedule.append({
-                'id': event['id'],
-                'doctor': doctor,
-                'patient': patient,
-                'start': start_time,
-                'end': end_time,
-                'description': description,
-                'status': event.get('status', 'confirmed'),
-                'link': event.get('htmlLink')
-            })
-        
-        return jsonify({
-            'success': True,
-            'start_date': start_date,
-            'end_date': end_date,
-            'appointments': schedule,
-            'total': len(schedule)
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# ============================================
-# ENDPOINT 4: RESCHEDULE APPOINTMENT
-# ============================================
-
-@app.route('/api/appointments/<appointment_id>/reschedule', methods=['PUT'])
-def reschedule_appointment(appointment_id):
-    """
-    Reschedule an existing appointment
-    
-    Request Body:
-    {
-        "new_date": "2025-10-16",
-        "new_time": "14:00"
-    }
-    """
-    try:
-        data = request.json
-        
-        new_date = data.get('new_date')
-        new_time = data.get('new_time')
-        
-        if not new_date or not new_time:
-            return jsonify({
-                'success': False,
-                'error': 'Both new_date and new_time are required'
-            }), 400
-        
-        # Find the existing event
-        event = find_event_by_id(appointment_id)
-        
-        if not event:
-            return jsonify({
-                'success': False,
-                'error': 'Appointment not found'
-            }), 404
-        
-        # Check if new slot is available
-        if not is_slot_available(new_date, new_time):
-            available = get_available_slots(new_date)
-            return jsonify({
-                'success': False,
-                'error': 'New time slot not available',
-                'available_slots': available[:5]
-            }), 409
-        
-        # Update the event
-        new_start_dt = parse_datetime(new_date, new_time)
-        new_end_dt = new_start_dt + timedelta(minutes=SLOT_DURATION)
-        
-        event['start'] = {
-            'dateTime': new_start_dt.isoformat(),
-            'timeZone': 'Asia/Kolkata',
-        }
-        event['end'] = {
-            'dateTime': new_end_dt.isoformat(),
-            'timeZone': 'Asia/Kolkata',
-        }
-        
-        # Add rescheduling note
-        original_description = event.get('description', '')
-        event['description'] = f"{original_description}\n\n[RESCHEDULED from original time]"
-        
-        updated_event = calendar_service.events().update(
-            calendarId=CALENDAR_ID,
-            eventId=appointment_id,
-            body=event
-        ).execute()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Appointment rescheduled successfully',
-            'appointment': {
-                'id': updated_event['id'],
-                'new_date': new_date,
-                'new_time': new_time,
-                'calendar_link': updated_event.get('htmlLink')
-            }
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# ============================================
-# ENDPOINT 5: CANCEL APPOINTMENT
-# ============================================
-
-@app.route('/api/appointments/<appointment_id>', methods=['DELETE'])
-def cancel_appointment(appointment_id):
-    """
-    Cancel an appointment
-    
-    Path Parameter:
-    - appointment_id: The ID of the appointment to cancel
-    """
-    try:
-        # Check if event exists
-        event = find_event_by_id(appointment_id)
-        
-        if not event:
-            return jsonify({
-                'success': False,
-                'error': 'Appointment not found'
-            }), 404
-        
-        # Delete the event
-        calendar_service.events().delete(
-            calendarId=CALENDAR_ID,
-            eventId=appointment_id
-        ).execute()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Appointment cancelled successfully',
-            'appointment_id': appointment_id
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# ============================================
-# ENDPOINT 6: GET PATIENT APPOINTMENTS
-# ============================================
-
-@app.route('/api/patients/<phone>/appointments', methods=['GET'])
-def get_patient_appointments(phone):
-    """
-    Get all upcoming appointments for a patient by phone number
-    
-    Path Parameter:
-    - phone: Patient's phone number
-    """
-    try:
-        events = find_events_by_patient_phone(phone)
-        
-        appointments = []
-        for event in events:
-            summary = event.get('summary', '')
-            description = event.get('description', '')
-            
-            # Extract doctor name
-            doctor = ''
-            if '[' in summary and ']' in summary:
-                doctor = summary[summary.find('[')+1:summary.find(']')]
-            
-            start_time = event['start'].get('dateTime', event['start'].get('date'))
-            
-            appointments.append({
-                'id': event['id'],
-                'doctor': doctor,
-                'start': start_time,
-                'description': description,
-                'status': event.get('status', 'confirmed'),
-                'link': event.get('htmlLink')
-            })
-        
-        return jsonify({
-            'success': True,
-            'phone': phone,
-            'appointments': appointments,
-            'total': len(appointments)
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# ============================================
-# ENDPOINT 7: GET APPOINTMENT DETAILS
-# ============================================
-
-@app.route('/api/appointments/<appointment_id>', methods=['GET'])
-def get_appointment_details(appointment_id):
-    """
-    Get details of a specific appointment
-    
-    Path Parameter:
-    - appointment_id: The ID of the appointment
-    """
-    try:
-        event = find_event_by_id(appointment_id)
-        
-        if not event:
-            return jsonify({
-                'success': False,
-                'error': 'Appointment not found'
-            }), 404
-        
-        summary = event.get('summary', '')
-        description = event.get('description', '')
-        
-        # Extract doctor name
-        doctor = ''
-        if '[' in summary and ']' in summary:
-            doctor = summary[summary.find('[')+1:summary.find(']')]
-        
-        # Extract patient name
-        patient = summary.replace(f'[{doctor}]', '').strip()
-        
-        return jsonify({
-            'success': True,
-            'appointment': {
-                'id': event['id'],
-                'doctor': doctor,
-                'patient': patient,
-                'start': event['start'].get('dateTime'),
-                'end': event['end'].get('dateTime'),
-                'description': description,
-                'status': event.get('status', 'confirmed'),
-                'link': event.get('htmlLink'),
-                'created': event.get('created'),
-                'updated': event.get('updated')
-            }
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
 
 # ============================================
 # ENDPOINT 8: GET SPECIALTIES LIST
@@ -411,8 +90,12 @@ def get_specialties():
     """
     return jsonify({
         'success': True,
-        'specialties': DOCTORS,
-        'total_specialties': len(DOCTORS)
+        'resource_found': True,
+        'message': 'Specialties fetched',
+        'data': {
+            'specialties': DOCTORS,
+            'total_specialties': len(DOCTORS)
+        }
     }), 200
 
 # Removed monolithic ElevenLabs webhook and internal helpers for MVP simplicity
@@ -425,29 +108,202 @@ def get_specialties():
 def health_check():
     """Health check endpoint"""
     return jsonify({
-        'status': 'healthy',
-        'service': 'Hospital Booking API',
-        'version': '1.0.0'
+        'success': True,
+        'resource_found': True,
+        'message': 'OK',
+        'data': {
+            'status': 'healthy',
+            'service': 'Hospital Booking API',
+            'version': '1.0.0'
+        }
     }), 200
 
 @app.route('/', methods=['GET'])
 def api_info():
     """API documentation"""
     return jsonify({
-        'service': 'Hospital Appointment Booking API',
-        'version': '1.0.0',
-        'endpoints': {
-            'POST /webhook/create_appointment': 'Create appointment (MVP single endpoint)',
-            'GET /api/availability': 'Check available slots',
-            'GET /api/schedule': 'Get doctor schedule',
-            'PUT /api/appointments/<id>/reschedule': 'Reschedule appointment',
-            'DELETE /api/appointments/<id>': 'Cancel appointment',
-            'GET /api/patients/<phone>/appointments': 'Get patient appointments',
-            'GET /api/appointments/<id>': 'Get appointment details',
-            'GET /api/specialties': 'List all specialties',
-        },
-        'docs': 'See README for detailed API documentation'
+        'success': True,
+        'resource_found': True,
+        'message': 'API info',
+        'data': {
+            'service': 'Hospital Appointment Booking API',
+            'version': '1.0.0',
+            'endpoints': {
+                'GET /api/debug/db': 'Debug: snapshot of SQLite state',
+                'GET /admin/db-viewer': 'HTML viewer for SQLite data',
+                'POST /webhook/create_appointment': 'Create appointment (MVP single endpoint)',
+                'GET /api/patients/<phone>': 'Get patient by phone',
+                'POST /api/patients': 'Create or update patient (phone, name)',
+                'GET /api/appointments/by-phone': 'Get upcoming appointments by patient phone',
+                'GET /api/specialties': 'List all specialties'
+            },
+            'docs': 'See README for detailed API documentation'
+        }
     }), 200
+
+# ============================================
+# DEBUG: DB SNAPSHOT
+# ============================================
+
+@app.route('/api/debug/db', methods=['GET'])
+def debug_db_snapshot():
+    try:
+        limit = request.args.get('limit', default='100')
+        try:
+            limit_int = int(limit)
+        except ValueError:
+            limit_int = 100
+        snapshot = get_db_snapshot(limit=limit_int)
+        return jsonify({'success': True, 'resource_found': True, 'message': 'Snapshot fetched', 'data': snapshot}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
+
+# ============================================
+# ADMIN: SIMPLE DB VIEWER (HTML)
+# ============================================
+
+@app.route('/admin/db-viewer', methods=['GET'])
+def admin_db_viewer():
+    try:
+        limit = request.args.get('limit', default='100')
+        try:
+            limit_int = int(limit)
+        except ValueError:
+            limit_int = 100
+        snapshot = get_db_snapshot(limit=limit_int)
+
+        # Render minimal HTML table
+        def h(text):
+            return (text or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        rows_doctors = ''.join([
+            f"<tr><td>{d.get('id')}</td><td>{h(d.get('name'))}</td><td>{h(d.get('specialty'))}</td><td>{d.get('active')}</td></tr>"
+            for d in snapshot.get('doctors', [])
+        ])
+
+        rows_patients = ''.join([
+            f"<tr><td>{h(p.get('patient_phone'))}</td><td>{h(p.get('name'))}</td></tr>"
+            for p in snapshot.get('patients', [])
+        ])
+
+        rows_appts = ''.join([
+            f"<tr><td>{a.get('id')}</td><td>{h(a.get('external_id'))}</td><td>{h(a.get('patient_phone'))}</td>"
+            f"<td>{a.get('doctor_id')}</td><td>{h(a.get('specialty'))}</td><td>{h(a.get('start_ist'))}</td>"
+            f"<td>{h(a.get('end_ist'))}</td><td>{h(a.get('status'))}</td></tr>"
+            for a in snapshot.get('appointments', [])
+        ])
+
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset='utf-8' />
+  <title>DB Viewer</title>
+  <style>
+    body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }}
+    h1 {{ margin-top: 0; }}
+    table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; font-size: 14px; }}
+    th {{ background: #f5f5f5; text-align: left; }}
+    caption {{ text-align: left; font-weight: bold; margin: 8px 0; }}
+    .meta {{ color: #666; margin-bottom: 16px; }}
+  </style>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta http-equiv='Cache-Control' content='no-store' />
+  <meta http-equiv='Pragma' content='no-cache' />
+  <meta http-equiv='Expires' content='0' />
+  <link rel='icon' href='data:,'>
+  <script> </script>
+  <meta http-equiv='Content-Security-Policy' content="default-src 'self' 'unsafe-inline' data:;">
+  <meta name='robots' content='noindex, nofollow'>
+  <meta name='referrer' content='no-referrer'>
+  <meta name='color-scheme' content='light dark'>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta http-equiv='X-Content-Type-Options' content='nosniff'>
+  <meta http-equiv='X-Frame-Options' content='DENY'>
+  <meta http-equiv='X-XSS-Protection' content='1; mode=block'>
+  <meta name='format-detection' content='telephone=no'>
+  <meta name='theme-color' content='#ffffff'>
+  <meta name='apple-mobile-web-app-capable' content='yes'>
+  <meta name='apple-mobile-web-app-status-bar-style' content='default'>
+  <meta name='apple-mobile-web-app-title' content='DB Viewer'>
+  <meta name='application-name' content='DB Viewer'>
+  <meta name='msapplication-TileColor' content='#ffffff'>
+  <meta name='msapplication-tap-highlight' content='no'>
+  <meta http-equiv='Permissions-Policy' content='interest-cohort=()'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta http-equiv='Referrer-Policy' content='no-referrer'>
+  <meta http-equiv='Strict-Transport-Security' content='max-age=31536000; includeSubDomains'>
+  <meta http-equiv='Cross-Origin-Resource-Policy' content='same-origin'>
+  <meta http-equiv='Cross-Origin-Opener-Policy' content='same-origin'>
+  <meta http-equiv='Cross-Origin-Embedder-Policy' content='require-corp'>
+  <meta http-equiv='Origin-Agent-Cluster' content='?1'>
+</head>
+<body>
+  <h1>SQLite Viewer</h1>
+  <div class='meta'>Last Sync (UTC): {h(snapshot.get('last_sync_at_utc'))} · Showing up to {limit_int} rows</div>
+
+  <table>
+    <caption>Doctors ({len(snapshot.get('doctors', []))})</caption>
+    <thead><tr><th>ID</th><th>Name</th><th>Specialty</th><th>Active</th></tr></thead>
+    <tbody>{rows_doctors}</tbody>
+  </table>
+
+  <table>
+    <caption>Patients ({len(snapshot.get('patients', []))})</caption>
+    <thead><tr><th>Phone</th><th>Name</th></tr></thead>
+    <tbody>{rows_patients}</tbody>
+  </table>
+
+  <table>
+    <caption>Appointments ({len(snapshot.get('appointments', []))})</caption>
+    <thead>
+      <tr>
+        <th>ID</th><th>EventID</th><th>Phone</th><th>DoctorID</th>
+        <th>Specialty</th><th>Start(IST)</th><th>End(IST)</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>{rows_appts}</tbody>
+  </table>
+
+  <p class='meta'>For a JSON view, use <code>/api/debug/db</code>.</p>
+</body>
+</html>
+        """
+        return html, 200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}
+    except Exception as e:
+        return f"Error: {e}", 500, {'Content-Type': 'text/plain; charset=utf-8'}
+
+# ============================================
+# PATIENT ENDPOINTS
+# ============================================
+
+@app.route('/api/patients', methods=['POST'])
+def create_or_update_patient():
+    try:
+        data = request.json or {}
+        phone = data.get('patient_phone') or data.get('phone')
+        name = data.get('patient_name') or data.get('name')
+        if not phone or not name:
+            return jsonify({'success': False, 'resource_found': False, 'message': 'patient_phone and patient_name are required', 'data': None}), 400
+        init_db()
+        upsert_patient(phone, name)
+        return jsonify({'success': True, 'resource_found': True, 'message': 'Patient upserted', 'data': {'patient_phone': phone, 'name': name}}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
+
+
+@app.route('/api/patients/<phone>', methods=['GET'])
+def get_patient(phone):
+    try:
+        init_db()
+        patient = get_patient_by_phone(phone)
+        if not patient:
+            return jsonify({'success': True, 'resource_found': False, 'message': 'Patient not found', 'data': None}), 200
+        return jsonify({'success': True, 'resource_found': True, 'message': 'Patient fetched', 'data': patient}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
 
 # ============================================
 # RUN SERVER

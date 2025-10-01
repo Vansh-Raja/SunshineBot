@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import os
 import json
-import sqlite3
+import psycopg2
+import psycopg2.extras
 
 load_dotenv()
 
@@ -41,13 +43,22 @@ CALENDAR_ID = os.getenv('CALENDAR_ID')
 # SQLITE SETUP (MVP cache/index)
 # ============================================
 
-DB_PATH = os.getenv('DB_PATH', 'sunshine.db')
+PG_HOST = os.getenv('PG_HOST', 'postgres.sunshine.vanshraja.me')
+PG_PORT = int(os.getenv('PG_PORT', '5432'))
+PG_USER = os.getenv('PG_USER', 'postgres')
+PG_PASSWORD = os.getenv('PG_PASSWORD', '')
+PG_DB = os.getenv('PG_DB', 'postgres')
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_db():
+    return psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname=PG_DB,
+        cursor_factory=psycopg2.extras.RealDictCursor
+    )
 
 
 def init_db() -> None:
@@ -55,69 +66,67 @@ def init_db() -> None:
     cur = conn.cursor()
     # Tables
     cur.execute(
-        '''CREATE TABLE IF NOT EXISTS patients (
+        """CREATE TABLE IF NOT EXISTS patients (
                patient_phone TEXT PRIMARY KEY,
                name TEXT,
-               email TEXT,
-               created_at TEXT DEFAULT (datetime('now')),
-               updated_at TEXT DEFAULT (datetime('now'))
-           )'''
+               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+               updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )"""
     )
 
     cur.execute(
-        '''CREATE TABLE IF NOT EXISTS doctors (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
+        """CREATE TABLE IF NOT EXISTS doctors (
+               id SERIAL PRIMARY KEY,
                name TEXT UNIQUE,
                specialty TEXT,
                working_hours_start INTEGER,
                working_hours_end INTEGER,
                slot_duration INTEGER,
-               active INTEGER DEFAULT 1,
-               created_at TEXT DEFAULT (datetime('now')),
-               updated_at TEXT DEFAULT (datetime('now'))
-           )'''
+               active BOOLEAN DEFAULT TRUE,
+               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+               updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )"""
     )
 
     cur.execute(
-        '''CREATE TABLE IF NOT EXISTS appointments (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
+        """CREATE TABLE IF NOT EXISTS appointments (
+               id SERIAL PRIMARY KEY,
                external_id TEXT UNIQUE,
-               patient_phone TEXT,
-               doctor_id INTEGER,
+               patient_phone TEXT REFERENCES patients(patient_phone),
+               doctor_id INTEGER REFERENCES doctors(id),
                specialty TEXT,
-               start_ts_utc TEXT,
-               end_ts_utc TEXT,
+               start_ts_utc TIMESTAMP WITH TIME ZONE,
+               end_ts_utc TIMESTAMP WITH TIME ZONE,
                status TEXT,
                html_link TEXT,
                description TEXT,
-               created_at_utc TEXT,
-               updated_at_utc TEXT,
-               FOREIGN KEY(patient_phone) REFERENCES patients(patient_phone),
-               FOREIGN KEY(doctor_id) REFERENCES doctors(id)
-           )'''
+               created_at_utc TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+               updated_at_utc TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )"""
     )
 
     cur.execute('CREATE INDEX IF NOT EXISTS idx_appt_doctor_start ON appointments(doctor_id, start_ts_utc)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_appt_phone_start ON appointments(patient_phone, start_ts_utc)')
 
     cur.execute(
-        '''CREATE TABLE IF NOT EXISTS sync_state (
-               id INTEGER PRIMARY KEY CHECK (id = 1),
-               last_sync_at_utc TEXT,
+        """CREATE TABLE IF NOT EXISTS sync_state (
+               id INTEGER PRIMARY KEY,
+               last_sync_at_utc TIMESTAMP WITH TIME ZONE,
                sync_token TEXT
-           )'''
+           )"""
     )
-    cur.execute('INSERT OR IGNORE INTO sync_state(id) VALUES (1)')
+    cur.execute('INSERT INTO sync_state(id) VALUES (1) ON CONFLICT (id) DO NOTHING')
     conn.commit()
-
-    # Seed doctors from DOCTORS config
+    
+    # Seed one doctor per specialty from DOCTORS config (first entry only)
     for specialty, names in DOCTORS.items():
-        for name in names:
-            cur.execute(
-                '''INSERT OR IGNORE INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (name, specialty, WORKING_HOURS_START, WORKING_HOURS_END, SLOT_DURATION)
-            )
+        if not names:
+            continue
+        name = names[0]
+        cur.execute(
+            'INSERT INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (name) DO NOTHING',
+            (name, specialty, WORKING_HOURS_START, WORKING_HOURS_END, SLOT_DURATION)
+        )
     conn.commit()
     conn.close()
 
@@ -125,37 +134,67 @@ def init_db() -> None:
 def get_doctor_id_by_name(name: str) -> int | None:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT id FROM doctors WHERE name = ?', (name,))
+    cur.execute('SELECT id FROM doctors WHERE name = %s', (name,))
     row = cur.fetchone()
     conn.close()
     return row['id'] if row else None
 
 
-def upsert_patient(patient_phone: str, name: str | None, email: str | None) -> None:
+def upsert_patient(patient_phone: str, name: str | None) -> None:
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        '''INSERT INTO patients(patient_phone, name, email)
-           VALUES(?, ?, ?)
-           ON CONFLICT(patient_phone) DO UPDATE SET
-             name=excluded.name,
-             email=excluded.email,
-             updated_at=datetime('now')''',
-        (patient_phone, name, email)
+        'INSERT INTO patients(patient_phone, name) VALUES (%s,%s) ON CONFLICT (patient_phone) DO UPDATE SET name=EXCLUDED.name, updated_at=NOW()',
+        (patient_phone, name)
     )
     conn.commit()
     conn.close()
+
+
+def get_patient_by_phone(patient_phone: str) -> dict | None:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('SELECT patient_phone, name, created_at, updated_at FROM patients WHERE patient_phone = %s', (patient_phone,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_upcoming_appointments_by_phone(patient_phone: str, limit: int = 50) -> list[dict]:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link FROM appointments WHERE patient_phone = %s AND end_ts_utc >= NOW() AND status = %s ORDER BY start_ts_utc ASC LIMIT %s',
+        (patient_phone, 'confirmed', limit)
+    )
+    rows = cur.fetchall()
+    conn.close()
+    ist = ZoneInfo("Asia/Kolkata")
+    appts = []
+    for r in rows:
+        d = dict(r)
+        try:
+            start_utc = datetime.fromisoformat(d.get('start_ts_utc'))
+            end_utc = datetime.fromisoformat(d.get('end_ts_utc'))
+            if start_utc.tzinfo is None:
+                start_utc = start_utc.replace(tzinfo=timezone.utc)
+            if end_utc.tzinfo is None:
+                end_utc = end_utc.replace(tzinfo=timezone.utc)
+            d['start_ist'] = start_utc.astimezone(ist).strftime('%Y-%m-%d %H:%M')
+            d['end_ist'] = end_utc.astimezone(ist).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            d['start_ist'] = d.get('start_ts_utc')
+            d['end_ist'] = d.get('end_ts_utc')
+        appts.append(d)
+    return appts
 
 
 def has_overlap(doctor_id: int, start_ts_utc: str, end_ts_utc: str) -> bool:
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT 1 FROM appointments
-           WHERE doctor_id = ? AND status = 'confirmed'
-             AND NOT (end_ts_utc <= ? OR start_ts_utc >= ?)
-           LIMIT 1''',
-        (doctor_id, start_ts_utc, end_ts_utc)
+        'SELECT 1 FROM appointments WHERE doctor_id = %s AND status = %s AND NOT (end_ts_utc <= %s OR start_ts_utc >= %s) LIMIT 1',
+        (doctor_id, 'confirmed', start_ts_utc, end_ts_utc)
     )
     exists = cur.fetchone() is not None
     conn.close()
@@ -168,22 +207,8 @@ def upsert_appointment_row(*, external_id: str, patient_phone: str, doctor_id: i
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        '''INSERT INTO appointments(external_id, patient_phone, doctor_id, specialty,
-                                    start_ts_utc, end_ts_utc, status, html_link, description,
-                                    created_at_utc, updated_at_utc)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
-           ON CONFLICT(external_id) DO UPDATE SET
-             patient_phone=excluded.patient_phone,
-             doctor_id=excluded.doctor_id,
-             specialty=excluded.specialty,
-             start_ts_utc=excluded.start_ts_utc,
-             end_ts_utc=excluded.end_ts_utc,
-             status=excluded.status,
-             html_link=excluded.html_link,
-             description=excluded.description,
-             updated_at_utc=excluded.updated_at_utc''',
-        (external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status,
-         html_link or '', description or '', updated_at_utc or datetime.utcnow().isoformat())
+        'INSERT INTO appointments(external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link, description, updated_at_utc) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (external_id) DO UPDATE SET patient_phone=EXCLUDED.patient_phone, doctor_id=EXCLUDED.doctor_id, specialty=EXCLUDED.specialty, start_ts_utc=EXCLUDED.start_ts_utc, end_ts_utc=EXCLUDED.end_ts_utc, status=EXCLUDED.status, html_link=EXCLUDED.html_link, description=EXCLUDED.description, updated_at_utc=EXCLUDED.updated_at_utc',
+        (external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link or '', description or '', updated_at_utc or datetime.utcnow().isoformat())
     )
     conn.commit()
     conn.close()
@@ -280,12 +305,67 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 break
 
         conn = get_db()
-        conn.execute('UPDATE sync_state SET last_sync_at_utc=? WHERE id=1', (datetime.utcnow().isoformat(),))
+        cur = conn.cursor()
+        cur.execute('UPDATE sync_state SET last_sync_at_utc=%s WHERE id=1', (datetime.utcnow(),))
         conn.commit()
         conn.close()
     except Exception:
         # Ignore sync errors in MVP; endpoint can still proceed
         pass
+
+
+def get_db_snapshot(limit: int = 100) -> dict:
+    """Return a lightweight snapshot of DB state for debugging."""
+    conn = get_db()
+    cur = conn.cursor()
+    # Sync state
+    cur.execute('SELECT last_sync_at_utc FROM sync_state WHERE id=1')
+    sync_row = cur.fetchone()
+
+    # Doctors
+    cur.execute('SELECT id, name, specialty, active FROM doctors ORDER BY name LIMIT %s', (limit,))
+    doctors = cur.fetchall()
+
+    # Patients
+    cur.execute('SELECT patient_phone, name FROM patients ORDER BY updated_at DESC LIMIT %s', (limit,))
+    patients = cur.fetchall()
+
+    # Appointments (recent past to future) with IST projections
+    cur.execute(
+        'SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link FROM appointments WHERE end_ts_utc >= NOW() ORDER BY start_ts_utc ASC LIMIT %s',
+        (limit,)
+    )
+    rows = cur.fetchall()
+    appointments = []
+    ist = ZoneInfo("Asia/Kolkata")
+    for r in rows:
+        d = dict(r)
+        try:
+            start_utc = datetime.fromisoformat(d.get('start_ts_utc'))
+            end_utc = datetime.fromisoformat(d.get('end_ts_utc'))
+            if start_utc.tzinfo is None:
+                start_utc = start_utc.replace(tzinfo=timezone.utc)
+            if end_utc.tzinfo is None:
+                end_utc = end_utc.replace(tzinfo=timezone.utc)
+            d['start_ist'] = start_utc.astimezone(ist).strftime('%Y-%m-%d %H:%M')
+            d['end_ist'] = end_utc.astimezone(ist).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            d['start_ist'] = d.get('start_ts_utc')
+            d['end_ist'] = d.get('end_ts_utc')
+        appointments.append(d)
+
+    conn.close()
+    return {
+        'last_sync_at_utc': sync_row['last_sync_at_utc'] if sync_row else None,
+        'counts': {
+            'doctors': len(doctors),
+            'patients': len(patients),
+            'appointments': len(appointments),
+        },
+        'doctors': doctors,
+        'patients': patients,
+        'appointments': appointments,
+    }
 
 # ============================================
 # DOCTOR CONFIGURATION
@@ -310,8 +390,9 @@ SLOT_DURATION = 30       # 30 minutes per appointment
 # ============================================
 
 def parse_datetime(date_str, time_str):
-    """Convert date (YYYY-MM-DD) and time (HH:MM) to datetime object"""
-    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    """Convert date (YYYY-MM-DD) and time (HH:MM) to timezone-aware IST datetime"""
+    naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    return naive.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
 
 
 def get_events_in_range(start_datetime: datetime, end_datetime: datetime):
@@ -414,13 +495,15 @@ def create_appointment_logic(data: dict):
             if field not in data or data.get(field) in (None, ''):
                 return ({
                     'success': False,
-                    'error': f'Missing required field: {field}'
+                    'resource_found': False,
+                    'message': f"Missing required field: {field}",
+                    'data': None
                 }, 400)
 
         specialty = data['specialty']
         patient_name = data['patient_name']
         patient_phone = data['patient_phone']
-        patient_email = data.get('patient_email', '')
+        # patient_email removed per requirements
         date = data['date']
         time = data['time']
         reason = data.get('reason', 'General consultation')
@@ -429,12 +512,23 @@ def create_appointment_logic(data: dict):
         if specialty.lower() not in DOCTORS:
             return ({
                 'success': False,
-                'error': f'Unknown specialty: {specialty}. Available: {", ".join(DOCTORS.keys())}'
+                'resource_found': False,
+                'message': f'Unknown specialty: {specialty}. Available: {", ".join(DOCTORS.keys())}',
+                'data': None
             }, 400)
 
-        # Local overlap check using SQLite
+        # Working hours check in local time window
         start_dt_local = parse_datetime(date, time)
         end_dt_local = start_dt_local + timedelta(minutes=SLOT_DURATION)
+        if start_dt_local.hour < WORKING_HOURS_START or end_dt_local.hour > WORKING_HOURS_END:
+            return ({
+                'success': False,
+                'resource_found': True,
+                'message': 'Requested time is outside working hours',
+                'data': None
+            }, 200)
+
+        # Local overlap check using SQLite
         # Convert to UTC ISO for DB comparison
         start_ts_utc = start_dt_local.astimezone(timezone.utc).isoformat()
         end_ts_utc = end_dt_local.astimezone(timezone.utc).isoformat()
@@ -448,13 +542,12 @@ def create_appointment_logic(data: dict):
             doctor_id = get_doctor_id_by_name(doctor)
 
         if has_overlap(doctor_id, start_ts_utc, end_ts_utc):
-            # Provide alternatives from existing helper for convenience
-            available = get_available_slots(date, specialty)
             return ({
                 'success': False,
-                'error': 'Time slot not available',
-                'available_slots': available[:5]
-            }, 409)
+                'resource_found': True,
+                'message': 'Time slot not available',
+                'data': None
+            }, 200)
 
         # Create event in Google Calendar
         start_dt = start_dt_local
@@ -467,7 +560,6 @@ Specialty: {specialty}
 Doctor: {doctor}
 Patient: {patient_name}
 Phone: {patient_phone}
-Email: {patient_email}
 Reason: {reason}
 '''.strip(),
             'start': {
@@ -493,7 +585,7 @@ Reason: {reason}
         ).execute()
 
         # Upsert patient and appointment into DB
-        upsert_patient(patient_phone, patient_name, patient_email)
+        upsert_patient(patient_phone, patient_name)
         upsert_appointment_row(
             external_id=created_event['id'],
             patient_phone=patient_phone,
@@ -509,8 +601,9 @@ Reason: {reason}
 
         return ({
             'success': True,
+            'resource_found': True,
             'message': f'Appointment booked successfully with {doctor}',
-            'appointment': {
+            'data': {
                 'id': created_event['id'],
                 'doctor': doctor,
                 'patient_name': patient_name,
@@ -520,12 +613,14 @@ Reason: {reason}
                 'duration_minutes': SLOT_DURATION,
                 'calendar_link': created_event.get('htmlLink')
             }
-        }, 201)
+        }, 200)
 
     except Exception as e:
         return ({
             'success': False,
-            'error': str(e)
+            'resource_found': False,
+            'message': str(e),
+            'data': None
         }, 500)
 
 
