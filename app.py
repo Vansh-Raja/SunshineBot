@@ -315,7 +315,12 @@ if __name__ == '__main__':
     print(f"⏰ Working Hours: {WORKING_HOURS_START}:00 - {WORKING_HOURS_END}:00")
     print(f"⏱️  Slot Duration: {SLOT_DURATION} minutes")
     print(f"👨‍⚕️  Specialties: {', '.join(DOCTORS.keys())}")
-    print("\n🚀 Server running on http://localhost:5000")
-    print("📖 API docs at http://localhost:5000/\n")
-    
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("\n🚀 Server starting...")
+
+    import os
+    port = int(os.getenv('PORT', '5000'))
+    try:
+        from waitress import serve
+        serve(app, host='0.0.0.0', port=port)
+    except Exception:
+        app.run(host='0.0.0.0', port=port, debug=False)

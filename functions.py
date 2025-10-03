@@ -5,8 +5,7 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import os
 import json
-import psycopg2
-import psycopg2.extras
+import sqlite3
 
 load_dotenv()
 
@@ -43,22 +42,13 @@ CALENDAR_ID = os.getenv('CALENDAR_ID')
 # SQLITE SETUP (MVP cache/index)
 # ============================================
 
-PG_HOST = os.getenv('PG_HOST', 'postgres.sunshine.vanshraja.me')
-PG_PORT = int(os.getenv('PG_PORT', '5432'))
-PG_USER = os.getenv('PG_USER', 'postgres')
-PG_PASSWORD = os.getenv('PG_PASSWORD', '')
-PG_DB = os.getenv('PG_DB', 'postgres')
+DB_PATH = os.getenv('DB_PATH', 'sunshine.db')
 
 
-def get_db():
-    return psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname=PG_DB,
-        cursor_factory=psycopg2.extras.RealDictCursor
-    )
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db() -> None:
@@ -66,56 +56,56 @@ def init_db() -> None:
     cur = conn.cursor()
     # Tables
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS patients (
+        '''CREATE TABLE IF NOT EXISTS patients (
                patient_phone TEXT PRIMARY KEY,
                name TEXT,
-               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-               updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-           )"""
+               created_at TEXT DEFAULT (datetime('now')),
+               updated_at TEXT DEFAULT (datetime('now'))
+           )'''
     )
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS doctors (
-               id SERIAL PRIMARY KEY,
+        '''CREATE TABLE IF NOT EXISTS doctors (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
                name TEXT UNIQUE,
                specialty TEXT,
                working_hours_start INTEGER,
                working_hours_end INTEGER,
                slot_duration INTEGER,
-               active BOOLEAN DEFAULT TRUE,
-               created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-               updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-           )"""
+               active INTEGER DEFAULT 1,
+               created_at TEXT DEFAULT (datetime('now')),
+               updated_at TEXT DEFAULT (datetime('now'))
+           )'''
     )
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS appointments (
-               id SERIAL PRIMARY KEY,
+        '''CREATE TABLE IF NOT EXISTS appointments (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
                external_id TEXT UNIQUE,
-               patient_phone TEXT REFERENCES patients(patient_phone),
-               doctor_id INTEGER REFERENCES doctors(id),
+               patient_phone TEXT,
+               doctor_id INTEGER,
                specialty TEXT,
-               start_ts_utc TIMESTAMP WITH TIME ZONE,
-               end_ts_utc TIMESTAMP WITH TIME ZONE,
+               start_ts_utc TEXT,
+               end_ts_utc TEXT,
                status TEXT,
                html_link TEXT,
                description TEXT,
-               created_at_utc TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-               updated_at_utc TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-           )"""
+               created_at_utc TEXT DEFAULT (datetime('now')),
+               updated_at_utc TEXT
+           )'''
     )
 
     cur.execute('CREATE INDEX IF NOT EXISTS idx_appt_doctor_start ON appointments(doctor_id, start_ts_utc)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_appt_phone_start ON appointments(patient_phone, start_ts_utc)')
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS sync_state (
-               id INTEGER PRIMARY KEY,
-               last_sync_at_utc TIMESTAMP WITH TIME ZONE,
+        '''CREATE TABLE IF NOT EXISTS sync_state (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               last_sync_at_utc TEXT,
                sync_token TEXT
-           )"""
+           )'''
     )
-    cur.execute('INSERT INTO sync_state(id) VALUES (1) ON CONFLICT (id) DO NOTHING')
+    cur.execute('INSERT OR IGNORE INTO sync_state(id) VALUES (1)')
     conn.commit()
     
     # Seed one doctor per specialty from DOCTORS config (first entry only)
@@ -124,7 +114,8 @@ def init_db() -> None:
             continue
         name = names[0]
         cur.execute(
-            'INSERT INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (name) DO NOTHING',
+            '''INSERT OR IGNORE INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration)
+               VALUES (?, ?, ?, ?, ?)''',
             (name, specialty, WORKING_HOURS_START, WORKING_HOURS_END, SLOT_DURATION)
         )
     conn.commit()
@@ -134,7 +125,7 @@ def init_db() -> None:
 def get_doctor_id_by_name(name: str) -> int | None:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT id FROM doctors WHERE name = %s', (name,))
+    cur.execute('SELECT id FROM doctors WHERE name = ?', (name,))
     row = cur.fetchone()
     conn.close()
     return row['id'] if row else None
@@ -144,7 +135,11 @@ def upsert_patient(patient_phone: str, name: str | None) -> None:
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        'INSERT INTO patients(patient_phone, name) VALUES (%s,%s) ON CONFLICT (patient_phone) DO UPDATE SET name=EXCLUDED.name, updated_at=NOW()',
+        '''INSERT INTO patients(patient_phone, name)
+           VALUES(?, ?)
+           ON CONFLICT(patient_phone) DO UPDATE SET
+             name=excluded.name,
+             updated_at=datetime('now')''',
         (patient_phone, name)
     )
     conn.commit()
@@ -154,7 +149,7 @@ def upsert_patient(patient_phone: str, name: str | None) -> None:
 def get_patient_by_phone(patient_phone: str) -> dict | None:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT patient_phone, name, created_at, updated_at FROM patients WHERE patient_phone = %s', (patient_phone,))
+    cur.execute('SELECT patient_phone, name, created_at, updated_at FROM patients WHERE patient_phone = ?', (patient_phone,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -163,9 +158,16 @@ def get_patient_by_phone(patient_phone: str) -> dict | None:
 def get_upcoming_appointments_by_phone(patient_phone: str, limit: int = 50) -> list[dict]:
     conn = get_db()
     cur = conn.cursor()
+    # Use SQLite datetime() to avoid lexical string comparison issues
     cur.execute(
-        'SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link FROM appointments WHERE patient_phone = %s AND end_ts_utc >= NOW() AND status = %s ORDER BY start_ts_utc ASC LIMIT %s',
-        (patient_phone, 'confirmed', limit)
+        '''SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link
+           FROM appointments
+           WHERE patient_phone = ?
+             AND status = 'confirmed'
+             AND datetime(end_ts_utc) >= datetime('now')
+           ORDER BY datetime(start_ts_utc) ASC
+           LIMIT ?''',
+        (patient_phone, limit)
     )
     rows = cur.fetchall()
     conn.close()
@@ -193,8 +195,11 @@ def has_overlap(doctor_id: int, start_ts_utc: str, end_ts_utc: str) -> bool:
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        'SELECT 1 FROM appointments WHERE doctor_id = %s AND status = %s AND NOT (end_ts_utc <= %s OR start_ts_utc >= %s) LIMIT 1',
-        (doctor_id, 'confirmed', start_ts_utc, end_ts_utc)
+        '''SELECT 1 FROM appointments
+           WHERE doctor_id = ? AND status = 'confirmed'
+             AND NOT (end_ts_utc <= ? OR start_ts_utc >= ?)
+           LIMIT 1''',
+        (doctor_id, start_ts_utc, end_ts_utc)
     )
     exists = cur.fetchone() is not None
     conn.close()
@@ -207,8 +212,22 @@ def upsert_appointment_row(*, external_id: str, patient_phone: str, doctor_id: i
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        'INSERT INTO appointments(external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link, description, updated_at_utc) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (external_id) DO UPDATE SET patient_phone=EXCLUDED.patient_phone, doctor_id=EXCLUDED.doctor_id, specialty=EXCLUDED.specialty, start_ts_utc=EXCLUDED.start_ts_utc, end_ts_utc=EXCLUDED.end_ts_utc, status=EXCLUDED.status, html_link=EXCLUDED.html_link, description=EXCLUDED.description, updated_at_utc=EXCLUDED.updated_at_utc',
-        (external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link or '', description or '', updated_at_utc or datetime.utcnow().isoformat())
+        '''INSERT INTO appointments(external_id, patient_phone, doctor_id, specialty,
+                                    start_ts_utc, end_ts_utc, status, html_link, description,
+                                    created_at_utc, updated_at_utc)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+           ON CONFLICT(external_id) DO UPDATE SET
+             patient_phone=excluded.patient_phone,
+             doctor_id=excluded.doctor_id,
+             specialty=excluded.specialty,
+             start_ts_utc=excluded.start_ts_utc,
+             end_ts_utc=excluded.end_ts_utc,
+             status=excluded.status,
+             html_link=excluded.html_link,
+             description=excluded.description,
+             updated_at_utc=excluded.updated_at_utc''',
+        (external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status,
+         html_link or '', description or '', updated_at_utc or datetime.utcnow().isoformat())
     )
     conn.commit()
     conn.close()
@@ -305,8 +324,7 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 break
 
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute('UPDATE sync_state SET last_sync_at_utc=%s WHERE id=1', (datetime.utcnow(),))
+        conn.execute('UPDATE sync_state SET last_sync_at_utc=? WHERE id=1', (datetime.utcnow().isoformat(),))
         conn.commit()
         conn.close()
     except Exception:
@@ -323,16 +341,20 @@ def get_db_snapshot(limit: int = 100) -> dict:
     sync_row = cur.fetchone()
 
     # Doctors
-    cur.execute('SELECT id, name, specialty, active FROM doctors ORDER BY name LIMIT %s', (limit,))
-    doctors = cur.fetchall()
+    cur.execute('SELECT id, name, specialty, active FROM doctors ORDER BY name LIMIT ?', (limit,))
+    doctors = [dict(r) for r in cur.fetchall()]
 
     # Patients
-    cur.execute('SELECT patient_phone, name FROM patients ORDER BY updated_at DESC LIMIT %s', (limit,))
-    patients = cur.fetchall()
+    cur.execute('SELECT patient_phone, name FROM patients ORDER BY updated_at DESC LIMIT ?', (limit,))
+    patients = [dict(r) for r in cur.fetchall()]
 
     # Appointments (recent past to future) with IST projections
     cur.execute(
-        'SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link FROM appointments WHERE end_ts_utc >= NOW() ORDER BY start_ts_utc ASC LIMIT %s',
+        '''SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link
+           FROM appointments
+           WHERE datetime(end_ts_utc) >= datetime('now')
+           ORDER BY datetime(start_ts_utc) ASC
+           LIMIT ?''',
         (limit,)
     )
     rows = cur.fetchall()
