@@ -1,0 +1,34 @@
+{
+  "type": "webhook",
+  "name": "list_patient_appointments",
+  "description": "Retrieve the caller's upcoming appointments by phone (primary identifier). Use when the patient asks what appointments they have or to confirm timings.",
+  "disable_interruptions": false,
+  "force_pre_tool_speech": "auto",
+  "assignments": [],
+  "api_schema": {
+    "url": "https://sunshine.vanshraja.me/api/appointments/by-phone",
+    "method": "GET",
+    "path_params_schema": [],
+    "query_params_schema": [
+      {
+        "id": "phone",
+        "type": "string",
+        "value_type": "dynamic_variable",
+        "description": "Patient phone number (primary identifier).",
+        "dynamic_variable": "system__caller_id",
+        "constant_value": "",
+        "enum": null,
+        "required": true
+      }
+    ],
+    "request_body_schema": null,
+    "request_headers": [],
+    "auth_connection": null
+  },
+  "response_timeout_secs": 20,
+  "dynamic_variables": {
+    "dynamic_variable_placeholders": {}
+  }
+}
+
+
