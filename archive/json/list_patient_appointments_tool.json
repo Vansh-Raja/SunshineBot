@@ -14,7 +14,7 @@
         "id": "phone",
         "type": "string",
         "value_type": "dynamic_variable",
-        "description": "Patient phone number (primary identifier).",
+        "description": "",
         "dynamic_variable": "system__caller_id",
         "constant_value": "",
         "enum": null,
@@ -30,5 +30,3 @@
     "dynamic_variable_placeholders": {}
   }
 }
-
-

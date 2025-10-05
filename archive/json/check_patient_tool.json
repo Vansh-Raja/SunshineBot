@@ -1,0 +1,38 @@
+{
+  "type": "webhook",
+  "name": "check_patient",
+  "description": "Check if a patient exists by phone number (caller ID). Returns patient details if present. This should be called automatically at the start of the conversation.",
+  "disable_interruptions": false,
+  "force_pre_tool_speech": "auto",
+  "assignments": [
+    {
+      "source": "response",
+      "dynamic_variable": "patient_name",
+      "value_path": "reponse.patient.name"
+    }
+  ],
+  "api_schema": {
+    "url": "https://sunshine.vanshraja.me/api/patients/{system__caller_id}",
+    "method": "GET",
+    "path_params_schema": [
+      {
+        "id": "system__caller_id",
+        "type": "string",
+        "value_type": "dynamic_variable",
+        "description": "",
+        "dynamic_variable": "system__caller_id",
+        "constant_value": "",
+        "enum": null,
+        "required": false
+      }
+    ],
+    "query_params_schema": [],
+    "request_body_schema": null,
+    "request_headers": [],
+    "auth_connection": null
+  },
+  "response_timeout_secs": 20,
+  "dynamic_variables": {
+    "dynamic_variable_placeholders": {}
+  }
+}

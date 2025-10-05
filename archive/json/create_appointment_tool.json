@@ -1,0 +1,89 @@
+{
+  "type": "webhook",
+  "name": "create_appointment",
+  "description": "Create a patient appointment in the SunshineBot system. Patient phone is the primary identifier.",
+  "disable_interruptions": false,
+  "force_pre_tool_speech": "auto",
+  "assignments": [],
+  "api_schema": {
+    "url": "https://sunshine.vanshraja.me/webhook/create_appointment",
+    "method": "POST",
+    "path_params_schema": [],
+    "query_params_schema": [],
+    "request_body_schema": {
+      "id": "body",
+      "type": "object",
+      "description": "Extract the appointment details from the user request. The phone number \nAlways include the patient's phone number (primary identifier), specialty, date (YYYY-MM-DD), and time (HH:MM 24h), Also make sure to ask the user the reason for the visit, like Stomach ache, Ear pain etc, and include in the paramters.",
+      "properties": [
+        {
+          "id": "patient_phone",
+          "type": "string",
+          "value_type": "dynamic_variable",
+          "description": "",
+          "dynamic_variable": "system__caller_id",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "specialty",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Medical specialty for the appointment (e.g., cardiology, orthopedics, general).",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "date",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Date of the appointment in YYYY-MM-DD.",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "time",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Time of the appointment in HH:MM (24-hour).",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "patient_name",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Full name of the patient. Would have been already gotten from the transcript when the earlier retrieve patient data would've been called.",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "reason",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Brief reason or notes for the visit. This might have been mentioned earlier in the call, or you could ask the caller for the reason, like \"Any specific reason for visit?\"",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        }
+      ],
+      "required": false,
+      "value_type": "llm_prompt"
+    },
+    "request_headers": [],
+    "auth_connection": null
+  },
+  "response_timeout_secs": 20,
+  "dynamic_variables": {
+    "dynamic_variable_placeholders": {}
+  }
+}

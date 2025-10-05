@@ -168,6 +168,45 @@ def test_reschedule() -> None:
         print(f"Request failed: {e}")
 
 
+def test_manage_delete() -> None:
+    print("\n-- Test: Manage Appointment - Delete --")
+    event_id = input_or_default("Event ID (from appointments list)", "")
+    if not event_id:
+        print("Event ID required")
+        return
+    url = f"{BASE_URL}/api/appointments/manage"
+    payload: Dict[str, Any] = {"action": "delete", "event_id": event_id}
+    try:
+        resp = requests.post(url, json=payload, timeout=20)
+        print_response(resp)
+    except Exception as e:
+        print(f"Request failed: {e}")
+
+
+def test_manage_reschedule() -> None:
+    print("\n-- Test: Manage Appointment - Reschedule --")
+    event_id = input_or_default("Event ID (from appointments list)", "")
+    if not event_id:
+        print("Event ID required")
+        return
+    default_date = datetime.now().strftime("%Y-%m-%d")
+    default_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+    new_date = input_or_default("New date (YYYY-MM-DD)", default_date)
+    new_time = input_or_default("New time (HH:MM)", default_time)
+    url = f"{BASE_URL}/api/appointments/manage"
+    payload: Dict[str, Any] = {
+        "action": "reschedule",
+        "event_id": event_id,
+        "new_date": new_date,
+        "new_time": new_time,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=20)
+        print_response(resp)
+    except Exception as e:
+        print(f"Request failed: {e}")
+
+
 def main() -> None:
     menu = textwrap.dedent(
         """
@@ -178,6 +217,8 @@ def main() -> None:
         3) Add/Update patient
         4) Get patient by phone
         5) Get appointments by phone
+        6) Manage appointment - delete
+        7) Manage appointment - reschedule
         q) Quit
         """
     )
@@ -203,6 +244,10 @@ def main() -> None:
                 print_response(resp)
             except Exception as e:
                 print(f"Request failed: {e}")
+        elif choice == "6":
+            test_manage_delete()
+        elif choice == "7":
+            test_manage_reschedule()
         elif choice in {"q", "quit", "exit"}:
             print("Bye!")
             sys.exit(0)

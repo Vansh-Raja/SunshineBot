@@ -1,6 +1,5 @@
 credentials.json
 service-account-key.json
-*.json
 .env
 __pycache__/
 *.db

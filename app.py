@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functions import (
     calendar_service,
     CALENDAR_ID,
@@ -21,6 +21,7 @@ from functions import (
     upsert_patient,
     get_patient_by_phone,
     get_upcoming_appointments_by_phone,
+    get_db,
 )
 
 app = Flask(__name__)
@@ -74,8 +75,119 @@ def appointments_by_phone():
         if not phone:
             return jsonify({'success': False, 'resource_found': False, 'message': 'phone is required', 'data': None}), 400
         appts = get_upcoming_appointments_by_phone(phone)
+        # Add event_id alias for external_id for client convenience
+        for a in appts:
+            if isinstance(a, dict) and 'external_id' in a:
+                a['event_id'] = a.get('external_id')
         found = len(appts) > 0
         return jsonify({'success': True, 'resource_found': found, 'message': 'Appointments fetched', 'data': {'phone': phone, 'appointments': appts, 'total': len(appts)}}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
+
+# ============================================
+# MANAGE APPOINTMENT: delete or reschedule by event_id
+# ============================================
+
+@app.route('/api/appointments/manage', methods=['POST'])
+def manage_appointment():
+    try:
+        data = request.json or {}
+        action = (data.get('action') or '').strip().lower()
+        event_id = data.get('event_id') or data.get('id') or data.get('external_id')
+        if not event_id or action not in {'delete', 'reschedule'}:
+            return jsonify({'success': False, 'resource_found': False, 'message': 'event_id and valid action (delete|reschedule) are required', 'data': None}), 400
+
+        init_db()
+
+        if action == 'delete':
+            try:
+                calendar_service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+            except Exception as _e:
+                # If already deleted on Google, continue to update local DB
+                pass
+            try:
+                conn = get_db()
+                conn.execute("UPDATE appointments SET status='cancelled', updated_at_utc=datetime('now') WHERE external_id=?", (event_id,))
+                conn.commit()
+                conn.close()
+            except Exception as _e:
+                # Non-fatal for API success as long as calendar deletion succeeded
+                pass
+            return jsonify({'success': True, 'resource_found': True, 'message': 'Appointment deleted', 'data': {'event_id': event_id}}), 200
+
+        # reschedule
+        new_date = data.get('new_date') or data.get('date')
+        new_time = data.get('new_time') or data.get('time')
+        if not new_date or not new_time:
+            return jsonify({'success': False, 'resource_found': True, 'message': 'new_date and new_time are required for reschedule', 'data': None}), 400
+
+        # Working hours check in IST
+        start_dt_local = parse_datetime(new_date, new_time)
+        end_dt_local = start_dt_local + timedelta(minutes=SLOT_DURATION)
+        if start_dt_local.hour < WORKING_HOURS_START or end_dt_local.hour > WORKING_HOURS_END:
+            return jsonify({'success': False, 'resource_found': True, 'message': 'Requested time is outside working hours', 'data': None}), 200
+
+        # Fetch appointment doctor_id for conflict check
+        doctor_id = None
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute('SELECT doctor_id FROM appointments WHERE external_id=?', (event_id,))
+            row = cur.fetchone()
+            doctor_id = row['doctor_id'] if row else None
+            conn.close()
+        except Exception:
+            doctor_id = None
+
+        # Conflict check against other confirmed appts for same doctor
+        if doctor_id is not None:
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+                start_ts_utc = start_dt_local.astimezone(timezone.utc).isoformat()
+                end_ts_utc = end_dt_local.astimezone(timezone.utc).isoformat()
+                cur.execute(
+                    '''SELECT 1 FROM appointments
+                       WHERE doctor_id=? AND status='confirmed' AND external_id != ?
+                         AND NOT (end_ts_utc <= ? OR start_ts_utc >= ?)
+                       LIMIT 1''',
+                    (doctor_id, event_id, start_ts_utc, end_ts_utc)
+                )
+                conflict = cur.fetchone() is not None
+                conn.close()
+                if conflict:
+                    return jsonify({'success': False, 'resource_found': True, 'message': 'Time slot not available', 'data': None}), 200
+            except Exception:
+                # If conflict check fails, proceed without blocking in MVP
+                pass
+
+        # Update on Google Calendar
+        try:
+            update_body = {
+                'start': {'dateTime': start_dt_local.isoformat(), 'timeZone': 'Asia/Kolkata'},
+                'end': {'dateTime': end_dt_local.isoformat(), 'timeZone': 'Asia/Kolkata'},
+            }
+            calendar_service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=update_body).execute()
+        except Exception as e:
+            return jsonify({'success': False, 'resource_found': True, 'message': f'Calendar update failed: {e}', 'data': None}), 500
+
+        # Update local DB
+        try:
+            conn = get_db()
+            conn.execute(
+                "UPDATE appointments SET start_ts_utc=?, end_ts_utc=?, updated_at_utc=datetime('now') WHERE external_id=?",
+                (
+                    start_dt_local.astimezone(timezone.utc).isoformat(),
+                    end_dt_local.astimezone(timezone.utc).isoformat(),
+                    event_id,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        return jsonify({'success': True, 'resource_found': True, 'message': 'Appointment rescheduled', 'data': {'event_id': event_id, 'date': new_date, 'time': new_time}}), 200
     except Exception as e:
         return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
 

@@ -242,6 +242,15 @@ def _parse_phone_from_description(desc: str) -> str | None:
     return None
 
 
+def _parse_patient_name_from_description(desc: str) -> str | None:
+    if not desc:
+        return None
+    for line in desc.splitlines():
+        if 'Patient:' in line:
+            return line.split('Patient:')[-1].strip()
+    return None
+
+
 def _event_times_to_utc_iso(event: dict) -> tuple[str, str]:
     start_str = event['start'].get('dateTime') or event['start'].get('date')
     end_str = event['end'].get('dateTime') or event['end'].get('date')
@@ -278,8 +287,8 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 return
         conn.close()
 
-        # Windowed fetch
-        time_min = (now_utc - timedelta(days=7)).isoformat() + 'Z'
+        # Windowed fetch (include past appointments too)
+        time_min = (now_utc - timedelta(days=180)).isoformat() + 'Z'
         time_max = (now_utc + timedelta(days=90)).isoformat() + 'Z'
 
         page_token = None
@@ -305,8 +314,29 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                     # Unknown doctor; skip in MVP
                     continue
                 phone = _parse_phone_from_description(description) or ''
+                patient_name = _parse_patient_name_from_description(description)
                 start_utc, end_utc = _event_times_to_utc_iso(ev)
                 status = ev.get('status', 'confirmed')
+                # Ensure patient exists if we have a phone number
+                if phone:
+                    try:
+                        upsert_patient(phone, patient_name)
+                    except Exception:
+                        pass
+                # Compute local status: cancelled | completed | confirmed
+                try:
+                    end_dt = datetime.fromisoformat(end_utc)
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    end_dt = now_utc
+                if status == 'cancelled':
+                    computed_status = 'cancelled'
+                elif end_dt < datetime.now(timezone.utc):
+                    computed_status = 'completed'
+                else:
+                    computed_status = 'confirmed'
+
                 upsert_appointment_row(
                     external_id=ev['id'],
                     patient_phone=phone,
@@ -314,7 +344,7 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                     specialty=ev.get('summary', ''),
                     start_ts_utc=start_utc,
                     end_ts_utc=end_utc,
-                    status='cancelled' if status == 'cancelled' else 'confirmed',
+                    status=computed_status,
                     html_link=ev.get('htmlLink'),
                     description=description,
                     updated_at_utc=ev.get('updated')
@@ -324,6 +354,16 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 break
 
         conn = get_db()
+        # Backfill: mark any past confirmed appointments as completed
+        try:
+            conn.execute("""
+                UPDATE appointments
+                SET status='completed', updated_at_utc=datetime('now')
+                WHERE status='confirmed' AND datetime(end_ts_utc) < datetime('now')
+            """)
+        except Exception:
+            pass
+
         conn.execute('UPDATE sync_state SET last_sync_at_utc=? WHERE id=1', (datetime.utcnow().isoformat(),))
         conn.commit()
         conn.close()
