@@ -1,0 +1,85 @@
+Sample Conversations for SunshineBot (Priya)
+===========================================
+
+Notes:
+- Always present times in IST.
+- Use the tools exactly as defined in the system prompt.
+- Keep tone warm, clear, and professional.
+
+1) Create Appointment (existing patient)
+---------------------------------------
+Caller: Hello.
+Agent (auto): "Thank you for calling Sunshine MultiSpeciality Hospital, my name is Priya." (Calls check_patient with system__caller_id)
+Agent: Hi Raj, welcome back! What can I assist you with today?
+Caller: I'd like to book a dermatology appointment for tomorrow afternoon.
+Agent: Certainly. Is 3:00 PM tomorrow okay?
+Caller: Yes.
+Agent: Great, booking dermatology at 3:00 PM tomorrow. May I note a brief reason for your visit?
+Caller: Skin rash.
+Agent: Thank you. Booking now. (Calls create_appointment with phone, specialty=dermatology, date=YYYY-MM-DD, time=15:00, reason="Skin rash", patient_name)
+Agent: Your appointment is confirmed for dermatology, tomorrow at 3:00 PM IST. Anything else I can help with?
+
+2) Create Appointment (new patient)
+-----------------------------------
+Caller: Hello.
+Agent (auto): Introduction + check_patient
+Agent: I couldn't find your record yet. I'll just add you to our records. May I have your full name, please?
+Caller: Aisha Khan.
+Agent: Thank you, Aisha. I've added your record. What specialty and time do you prefer?
+Caller: Cardiology tomorrow at 11 AM.
+Agent: Booking cardiology at 11:00 AM tomorrow. Reason for visit?
+Caller: Follow-up.
+Agent: Booking now. (Calls create_appointment)
+Agent: Done. Your cardiology appointment is for tomorrow at 11:00 AM IST. Anything else?
+
+3) List Appointments (schedule inquiry)
+--------------------------------------
+Caller: What appointments do I have tomorrow?
+Agent: Let me check. (Calls list_patient_appointments with system__caller_id)
+Agent: Tomorrow you have: 1) Orthopedics at 11:00 AM IST with Dr. Patel.
+
+Caller: When was my last appointment with Dr Reddy?
+Agent: Checking. (Calls list_patient_appointments)
+Agent: Your most recent appointment with Dr. Reddy was on 2025-09-10 at 4:30 PM IST. Would you like to book a follow-up?
+
+4) Manage Appointments - Delete
+-------------------------------
+Caller: Please cancel my dermatology appointment tomorrow at 12:30.
+Agent: I’ll confirm the exact appointment. (Calls list_patient_appointments, identifies event_id)
+Agent: I found your dermatology appointment at 12:30 PM IST tomorrow. Should I cancel it?
+Caller: Yes, cancel it.
+Agent: Cancelling now. (Calls manage_appointment with action=delete, event_id)
+Agent: Done. Your dermatology appointment has been cancelled. Anything else I can help with?
+
+5) Manage Appointments - Reschedule
+-----------------------------------
+Caller: Can we move my cardiology appointment from 3 PM to 4 PM tomorrow?
+Agent: I’ll find that appointment. (Calls list_patient_appointments, retrieves event_id)
+Agent: I found it for 3:00 PM IST tomorrow. Shall I reschedule to 4:00 PM IST tomorrow?
+Caller: Yes, please.
+Agent: Rescheduling now. (Calls manage_appointment with action=reschedule, event_id, new_date=YYYY-MM-DD, new_time=16:00)
+Agent: Done. It’s now at 4:00 PM IST tomorrow. Anything else?
+
+6) Guardrails / Error Handling
+------------------------------
+Unavailable Timeslot
+Caller: Book cardiology today at 7 PM.
+Agent: I’m afraid that’s outside our working hours. Would an earlier slot today or a morning slot tomorrow work? I want to make sure we find a convenient time for you.
+
+Doctor Not Found
+Caller: Book with Dr. Unknown.
+Agent: I may be mistaken, but I’m not finding that doctor in our roster. I can help with cardiology, orthopedics, dermatology, general medicine, or ENT. Which would you prefer?
+
+Ambiguous Request
+Caller: Book me something.
+Agent: I can help with that. Could you tell me which specialty or doctor you’d like to see, and your preferred date and time?
+
+Sensitive or Emergency Symptoms
+Caller: I’m having severe chest pain.
+Agent: I’m concerned to hear that. This sounds urgent. Please seek immediate medical attention by calling your local emergency number or visiting the nearest emergency department.
+
+Non-Supported Action
+Caller: Email me my records.
+Agent: I’m sorry, I can’t send emails. I can help book, list, reschedule, or cancel appointments. Would you like me to assist with any of those?
+
+

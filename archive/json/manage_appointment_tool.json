@@ -1,0 +1,69 @@
+{
+  "type": "webhook",
+  "name": "manage_appointment",
+  "description": "Manage an existing appointment by Google Calendar event ID (delete or reschedule). For reschedule, provide new_date (YYYY-MM-DD, IST) and new_time (HH:MM 24h, IST). Use event_id from prior listing.",
+  "disable_interruptions": false,
+  "force_pre_tool_speech": "auto",
+  "assignments": [],
+  "api_schema": {
+    "url": "https://sunshine.vanshraja.me/api/appointments/manage",
+    "method": "POST",
+    "path_params_schema": [],
+    "query_params_schema": [],
+    "request_body_schema": {
+      "id": "body",
+      "type": "object",
+      "description": "Provide the action to perform and the target event_id. If action is 'reschedule', also include new_date (YYYY-MM-DD) and new_time (HH:MM 24-hour). Times are interpreted in IST.",
+      "properties": [
+        {
+          "id": "action",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "One of: delete, reschedule",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": ["delete", "reschedule"],
+          "required": true
+        },
+        {
+          "id": "event_id",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Google Calendar event ID (also returned as event_id by the list tool)",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": true
+        },
+        {
+          "id": "new_date",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "New date in YYYY-MM-DD (IST). Required when action = reschedule.",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": false
+        },
+        {
+          "id": "new_time",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "New time in HH:MM 24-hour (IST). Required when action = reschedule.",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": false
+        }
+      ],
+      "required": false,
+      "value_type": "llm_prompt"
+    },
+    "request_headers": [],
+    "auth_connection": null
+  },
+  "response_timeout_secs": 20,
+  "dynamic_variables": {
+    "dynamic_variable_placeholders": {}
+  }
+}

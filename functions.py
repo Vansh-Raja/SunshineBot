@@ -155,16 +155,18 @@ def get_patient_by_phone(patient_phone: str) -> dict | None:
     return dict(row) if row else None
 
 
-def get_upcoming_appointments_by_phone(patient_phone: str, limit: int = 50) -> list[dict]:
+def get_patient_appointments_by_phone(patient_phone: str, limit: int = 200) -> list[dict]:
+    """Return all appointments for a patient phone across time and status.
+
+    Includes past, future, confirmed, cancelled, and completed appointments.
+    Ordered by start time ascending for natural chronology.
+    """
     conn = get_db()
     cur = conn.cursor()
-    # Use SQLite datetime() to avoid lexical string comparison issues
     cur.execute(
         '''SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link
            FROM appointments
            WHERE patient_phone = ?
-             AND status = 'confirmed'
-             AND datetime(end_ts_utc) >= datetime('now')
            ORDER BY datetime(start_ts_utc) ASC
            LIMIT ?''',
         (patient_phone, limit)
@@ -189,6 +191,10 @@ def get_upcoming_appointments_by_phone(patient_phone: str, limit: int = 50) -> l
             d['end_ist'] = d.get('end_ts_utc')
         appts.append(d)
     return appts
+
+# Backwards compatibility alias (temporary)
+def get_upcoming_appointments_by_phone(patient_phone: str, limit: int = 50) -> list[dict]:
+    return get_patient_appointments_by_phone(patient_phone, limit)
 
 
 def has_overlap(doctor_id: int, start_ts_utc: str, end_ts_utc: str) -> bool:
@@ -250,6 +256,14 @@ def _parse_patient_name_from_description(desc: str) -> str | None:
             return line.split('Patient:')[-1].strip()
     return None
 
+
+def _parse_specialty_from_description(desc: str) -> str | None:
+    if not desc:
+        return None
+    for line in desc.splitlines():
+        if 'Specialty:' in line:
+            return line.split('Specialty:')[-1].strip().lower()
+    return None
 
 def _event_times_to_utc_iso(event: dict) -> tuple[str, str]:
     start_str = event['start'].get('dateTime') or event['start'].get('date')
@@ -337,11 +351,12 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 else:
                     computed_status = 'confirmed'
 
+                specialty_from_desc = _parse_specialty_from_description(description)
                 upsert_appointment_row(
                     external_id=ev['id'],
                     patient_phone=phone,
                     doctor_id=doctor_id,
-                    specialty=ev.get('summary', ''),
+                    specialty=specialty_from_desc or ev.get('summary', ''),
                     start_ts_utc=start_utc,
                     end_ts_utc=end_utc,
                     status=computed_status,
@@ -388,11 +403,10 @@ def get_db_snapshot(limit: int = 100) -> dict:
     cur.execute('SELECT patient_phone, name FROM patients ORDER BY updated_at DESC LIMIT ?', (limit,))
     patients = [dict(r) for r in cur.fetchall()]
 
-    # Appointments (recent past to future) with IST projections
+    # Appointments (all) with IST projections
     cur.execute(
         '''SELECT id, external_id, patient_phone, doctor_id, specialty, start_ts_utc, end_ts_utc, status, html_link
            FROM appointments
-           WHERE datetime(end_ts_utc) >= datetime('now')
            ORDER BY datetime(start_ts_utc) ASC
            LIMIT ?''',
         (limit,)

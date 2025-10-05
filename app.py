@@ -21,6 +21,7 @@ from functions import (
     upsert_patient,
     get_patient_by_phone,
     get_upcoming_appointments_by_phone,
+    get_patient_appointments_by_phone,
     get_db,
 )
 
@@ -65,7 +66,7 @@ def webhook_create_appointment():
     return jsonify(payload), status
 
 # ============================================
-# GET APPOINTMENTS BY PHONE (UPCOMING)
+# GET APPOINTMENTS BY PHONE (ALL STATUSES/TIMES)
 # ============================================
 
 @app.route('/api/appointments/by-phone', methods=['GET'])
@@ -74,7 +75,8 @@ def appointments_by_phone():
         phone = request.args.get('phone')
         if not phone:
             return jsonify({'success': False, 'resource_found': False, 'message': 'phone is required', 'data': None}), 400
-        appts = get_upcoming_appointments_by_phone(phone)
+        # Return all appointments for LLM-side filtering (past/future/cancelled/completed)
+        appts = get_patient_appointments_by_phone(phone)
         # Add event_id alias for external_id for client convenience
         for a in appts:
             if isinstance(a, dict) and 'external_id' in a:
@@ -246,7 +248,7 @@ def api_info():
                 'POST /webhook/create_appointment': 'Create appointment (MVP single endpoint)',
                 'GET /api/patients/<phone>': 'Get patient by phone',
                 'POST /api/patients': 'Create or update patient (phone, name)',
-                'GET /api/appointments/by-phone': 'Get upcoming appointments by patient phone',
+                'GET /api/appointments/by-phone': 'Get appointments by patient phone (all statuses and times)',
                 'GET /api/specialties': 'List all specialties'
             },
             'docs': 'See README for detailed API documentation'
