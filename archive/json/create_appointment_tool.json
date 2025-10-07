@@ -16,6 +16,16 @@
       "description": "Extract the appointment details from the user request. The phone number \nAlways include the patient's phone number (primary identifier), specialty, date (YYYY-MM-DD), and time (HH:MM 24h), Also make sure to ask the user the reason for the visit, like Stomach ache, Ear pain etc, and include in the paramters.",
       "properties": [
         {
+          "id": "doctor_name",
+          "type": "string",
+          "value_type": "llm_prompt",
+          "description": "Optional. Full doctor name if the caller specifies (e.g., 'Dr. Asha Mehta'). If surname is ambiguous (e.g., 'Dr. Mehta'), ask the caller to confirm the exact doctor and specialty.",
+          "dynamic_variable": "",
+          "constant_value": "",
+          "enum": null,
+          "required": false
+        },
+        {
           "id": "patient_phone",
           "type": "string",
           "value_type": "dynamic_variable",

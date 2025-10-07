@@ -30,9 +30,11 @@ create_appt() {
     -d "{\"specialty\":\"$specialty\",\"patient_name\":\"$name\",\"patient_phone\":\"$phone\",\"date\":\"$DATE_TOMORROW_IST\",\"time\":\"$time24\",\"reason\":\"$reason\"}" | jq . || true
 }
 
-# Vansh: two appointments
-create_appt "general"     "Vansh Raja"   "+917021954565" "10:00" "Consultation"
-create_appt "cardiology"  "Vansh Raja"   "+917021954565" "15:00" "Follow-up"
+# Vansh: two appointments (explicit doctor_name examples to exercise ambiguity handling)
+curl -sS -X POST "$BASE_URL/webhook/create_appointment" -H "Content-Type: application/json" \
+  -d "{\"specialty\":\"general\",\"patient_name\":\"Vansh Raja\",\"patient_phone\":\"+917021954565\",\"date\":\"$DATE_TOMORROW_IST\",\"time\":\"10:00\",\"reason\":\"Consultation\",\"doctor_name\":\"Dr. Neeraj Singh\"}" | jq . || true
+curl -sS -X POST "$BASE_URL/webhook/create_appointment" -H "Content-Type: application/json" \
+  -d "{\"specialty\":\"cardiology\",\"patient_name\":\"Vansh Raja\",\"patient_phone\":\"+917021954565\",\"date\":\"$DATE_TOMORROW_IST\",\"time\":\"15:00\",\"reason\":\"Follow-up\",\"doctor_name\":\"Dr. Asha Mehta\"}" | jq . || true
 
 # Others: one each
 create_appt "orthopedics" "Aisha Khan"   "+919900112233" "11:00" "Knee pain"

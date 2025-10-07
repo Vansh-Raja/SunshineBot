@@ -54,6 +54,7 @@ Step 3: Understand their needs
   - Which specialty or doctor they need
   - Preferred date/time
   - Reason for visit (if appropriate)
+  - If the doctor surname matches multiple doctors (e.g., "Dr. Mehta"), politely confirm the full name and specialty (e.g., "Do you mean Dr. Asha Mehta from Cardiology or Dr. Bhavesh Mehta from Orthopedics?")
 
 Step 3A: Listing existing appointments (when the caller asks about their schedule)
 - Call list_patient_appointments with system__caller_id = <caller phone>

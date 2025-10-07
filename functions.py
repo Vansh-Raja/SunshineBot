@@ -449,11 +449,11 @@ def get_db_snapshot(limit: int = 100) -> dict:
 
 # Map specialties to available doctors
 DOCTORS = {
-    'cardiology': ['Dr. Mehta', 'Dr. Shah'],
-    'orthopedics': ['Dr. Patel', 'Dr. Kumar'],
-    'general': ['Dr. Singh', 'Dr. Verma'],
-    'ent': ['Dr. Reddy'],
-    'dermatology': ['Dr. Chopra']
+    'cardiology': ['Dr. Asha Mehta'],
+    'orthopedics': ['Dr. Bhavesh Mehta', 'Dr. Rohan Patel'],
+    'general': ['Dr. Neeraj Singh'],
+    'ent': ['Dr. Ananya Reddy'],
+    'dermatology': ['Dr. Kavita Chopra']
 }
 
 # Working hours
@@ -552,6 +552,18 @@ def assign_doctor(specialty: str) -> str:
     return doctors[0]
 
 
+def find_specialty_by_doctor_name(doctor_name: str) -> str | None:
+    """Find specialty for a given doctor full name (case-insensitive)."""
+    if not doctor_name:
+        return None
+    name_lc = doctor_name.strip().lower()
+    for spec, names in DOCTORS.items():
+        for n in names:
+            if n.lower() == name_lc:
+                return spec
+    return None
+
+
 # ============================================
 # BUSINESS LOGIC
 # ============================================
@@ -583,6 +595,7 @@ def create_appointment_logic(data: dict):
         date = data['date']
         time = data['time']
         reason = data.get('reason', 'General consultation')
+        requested_doctor_name = data.get('doctor_name')
 
         # Check if specialty exists
         if specialty.lower() not in DOCTORS:
@@ -592,6 +605,29 @@ def create_appointment_logic(data: dict):
                 'message': f'Unknown specialty: {specialty}. Available: {", ".join(DOCTORS.keys())}',
                 'data': None
             }, 400)
+
+        # If doctor_name explicitly provided, validate and align specialty
+        doctor: str
+        if requested_doctor_name:
+            doctor_spec = find_specialty_by_doctor_name(requested_doctor_name)
+            if doctor_spec is None:
+                return ({
+                    'success': False,
+                    'resource_found': False,
+                    'message': f"Unknown doctor: {requested_doctor_name}",
+                    'data': None
+                }, 200)
+            if doctor_spec.lower() != specialty.lower():
+                return ({
+                    'success': False,
+                    'resource_found': True,
+                    'message': f"Doctor {requested_doctor_name} belongs to {doctor_spec}. Please confirm the specialty.",
+                    'data': None
+                }, 200)
+            doctor = requested_doctor_name
+        else:
+            # Assign based on specialty
+            doctor = assign_doctor(specialty)
 
         # Working hours check in local time window
         start_dt_local = parse_datetime(date, time)
@@ -610,7 +646,6 @@ def create_appointment_logic(data: dict):
         end_ts_utc = end_dt_local.astimezone(timezone.utc).isoformat()
 
         # Determine doctor id
-        doctor = assign_doctor(specialty)
         doctor_id = get_doctor_id_by_name(doctor)
         if doctor_id is None:
             # Seed doctor to DB if missing (edge case)
