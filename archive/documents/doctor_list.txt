@@ -1,0 +1,15 @@
+Cardiology:
+- Dr. Asha Mehta
+
+Orthopedics:
+- Dr. Bhavesh Mehta
+- Dr. Rohan Patel
+
+General Medicine:
+- Dr. Neeraj Singh
+
+ENT:
+- Dr. Ananya Reddy
+
+Dermatology:
+- Dr. Kavita Chopra

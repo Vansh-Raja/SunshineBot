@@ -23,6 +23,7 @@ from functions import (
     get_upcoming_appointments_by_phone,
     get_patient_appointments_by_phone,
     get_db,
+    get_doctor_availability_slots,
 )
 
 app = Flask(__name__)
@@ -194,6 +195,27 @@ def manage_appointment():
         return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
 
 # ============================================
+# DOCTOR AVAILABILITY BY DAY
+# ============================================
+
+@app.route('/api/availability/doctor', methods=['GET'])
+def availability_by_doctor():
+    try:
+        doctor_id = request.args.get('doctor_id')
+        date = request.args.get('date')  # YYYY-MM-DD
+        if not doctor_id or not date:
+            return jsonify({'success': False, 'resource_found': False, 'message': 'doctor_id and date are required', 'data': None}), 400
+        try:
+            doctor_id_int = int(doctor_id)
+        except ValueError:
+            return jsonify({'success': False, 'resource_found': False, 'message': 'doctor_id must be an integer', 'data': None}), 400
+
+        slots = get_doctor_availability_slots(doctor_id_int, date)
+        return jsonify({'success': True, 'resource_found': True, 'message': 'Availability fetched', 'data': {'doctor_id': doctor_id_int, 'date': date, 'available_slots': slots}}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'resource_found': False, 'message': str(e), 'data': None}), 500
+
+# ============================================
 # ENDPOINT 8: GET SPECIALTIES LIST
 # ============================================
 
@@ -207,8 +229,8 @@ def get_specialties():
         'resource_found': True,
         'message': 'Specialties fetched',
         'data': {
-            'specialties': DOCTORS,
-            'total_specialties': len(DOCTORS)
+        'specialties': DOCTORS,
+        'total_specialties': len(DOCTORS)
         }
     }), 200
 
@@ -226,9 +248,9 @@ def health_check():
         'resource_found': True,
         'message': 'OK',
         'data': {
-            'status': 'healthy',
-            'service': 'Hospital Booking API',
-            'version': '1.0.0'
+        'status': 'healthy',
+        'service': 'Hospital Booking API',
+        'version': '1.0.0'
         }
     }), 200
 
@@ -240,9 +262,9 @@ def api_info():
         'resource_found': True,
         'message': 'API info',
         'data': {
-            'service': 'Hospital Appointment Booking API',
-            'version': '1.0.0',
-            'endpoints': {
+        'service': 'Hospital Appointment Booking API',
+        'version': '1.0.0',
+        'endpoints': {
                 'GET /api/debug/db': 'Debug: snapshot of SQLite state',
                 'GET /admin/db-viewer': 'HTML viewer for SQLite data',
                 'POST /webhook/create_appointment': 'Create appointment (MVP single endpoint)',
@@ -250,8 +272,8 @@ def api_info():
                 'POST /api/patients': 'Create or update patient (phone, name)',
                 'GET /api/appointments/by-phone': 'Get appointments by patient phone (all statuses and times)',
                 'GET /api/specialties': 'List all specialties'
-            },
-            'docs': 'See README for detailed API documentation'
+        },
+        'docs': 'See README for detailed API documentation'
         }
     }), 200
 
@@ -279,6 +301,11 @@ def debug_db_snapshot():
 @app.route('/admin/db-viewer', methods=['GET'])
 def admin_db_viewer():
     try:
+        # Ensure DB schema/seed is up-to-date so all doctors appear
+        try:
+            init_db()
+        except Exception:
+            pass
         limit = request.args.get('limit', default='100')
         try:
             limit_int = int(limit)
@@ -301,9 +328,17 @@ def admin_db_viewer():
         ])
 
         rows_appts = ''.join([
-            f"<tr><td>{a.get('id')}</td><td>{h(a.get('external_id'))}</td><td>{h(a.get('patient_phone'))}</td>"
-            f"<td>{a.get('doctor_id')}</td><td>{h(a.get('specialty'))}</td><td>{h(a.get('start_ist'))}</td>"
-            f"<td>{h(a.get('end_ist'))}</td><td>{h(a.get('status'))}</td></tr>"
+            f"<tr>"
+            f"<td>{a.get('id')}</td>"
+            f"<td>{h(a.get('external_id'))}</td>"
+            f"<td>{h(next((p.get('name') for p in snapshot.get('patients', []) if p.get('patient_phone') == a.get('patient_phone')), ''))}</td>"
+            f"<td>{h(a.get('patient_phone'))}</td>"
+            f"<td>{h(next((d.get('name') for d in snapshot.get('doctors', []) if d.get('id') == a.get('doctor_id')), str(a.get('doctor_id'))))}</td>"
+            f"<td>{h(a.get('specialty'))}</td>"
+            f"<td>{h(a.get('start_ist'))}</td>"
+            f"<td>{h(a.get('end_ist'))}</td>"
+            f"<td><span class='status {h(str(a.get('status')))}'>{h(a.get('status'))}</span></td>"
+            f"</tr>"
             for a in snapshot.get('appointments', [])
         ])
 
@@ -314,13 +349,19 @@ def admin_db_viewer():
   <meta charset='utf-8' />
   <title>DB Viewer</title>
   <style>
-    body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }}
-    h1 {{ margin-top: 0; }}
+    :root {{ color-scheme: dark; }}
+    body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; background:#0d0d0d; color:#eaeaea; }}
+    h1 {{ margin-top: 0; color:#eaeaea; }}
     table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; font-size: 14px; }}
-    th {{ background: #f5f5f5; text-align: left; }}
-    caption {{ text-align: left; font-weight: bold; margin: 8px 0; }}
-    .meta {{ color: #666; margin-bottom: 16px; }}
+    th, td {{ border: 1px solid #2b2b2b; padding: 10px; font-size: 14px; color:#eaeaea; }}
+    th {{ background: #1f1f1f; text-align: left; position: sticky; top: 0; }}
+    tr:nth-child(even) {{ background: #171717; }}
+    tr:nth-child(odd) {{ background: #111111; }}
+    caption {{ text-align: left; font-weight: bold; margin: 8px 0; color:#eaeaea; }}
+    .meta {{ color: #9e9e9e; margin-bottom: 16px; }}
+    .status.confirmed {{ color: #70e000; font-weight: 600; }}
+    .status.completed {{ color: #ffd166; font-weight: 600; }}
+    .status.cancelled {{ color: #ef476f; font-weight: 600; }}
   </style>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <meta http-equiv='Cache-Control' content='no-store' />
@@ -338,21 +379,7 @@ def admin_db_viewer():
   <meta http-equiv='X-Frame-Options' content='DENY'>
   <meta http-equiv='X-XSS-Protection' content='1; mode=block'>
   <meta name='format-detection' content='telephone=no'>
-  <meta name='theme-color' content='#ffffff'>
-  <meta name='apple-mobile-web-app-capable' content='yes'>
-  <meta name='apple-mobile-web-app-status-bar-style' content='default'>
-  <meta name='apple-mobile-web-app-title' content='DB Viewer'>
-  <meta name='application-name' content='DB Viewer'>
-  <meta name='msapplication-TileColor' content='#ffffff'>
-  <meta name='msapplication-tap-highlight' content='no'>
-  <meta http-equiv='Permissions-Policy' content='interest-cohort=()'>
-  <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <meta http-equiv='Referrer-Policy' content='no-referrer'>
-  <meta http-equiv='Strict-Transport-Security' content='max-age=31536000; includeSubDomains'>
-  <meta http-equiv='Cross-Origin-Resource-Policy' content='same-origin'>
-  <meta http-equiv='Cross-Origin-Opener-Policy' content='same-origin'>
-  <meta http-equiv='Cross-Origin-Embedder-Policy' content='require-corp'>
-  <meta http-equiv='Origin-Agent-Cluster' content='?1'>
+  <meta name='theme-color' content='#000000'>
 </head>
 <body>
   <h1>SQLite Viewer</h1>
@@ -374,8 +401,15 @@ def admin_db_viewer():
     <caption>Appointments ({len(snapshot.get('appointments', []))})</caption>
     <thead>
       <tr>
-        <th>ID</th><th>EventID</th><th>Phone</th><th>DoctorID</th>
-        <th>Specialty</th><th>Start(IST)</th><th>End(IST)</th><th>Status</th>
+        <th>ID</th>
+        <th>EventID</th>
+        <th>Patient</th>
+        <th>Phone</th>
+        <th>Doctor</th>
+        <th>Specialty</th>
+        <th>Start (IST)</th>
+        <th>End (IST)</th>
+        <th>Status</th>
       </tr>
     </thead>
     <tbody>{rows_appts}</tbody>

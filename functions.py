@@ -108,16 +108,16 @@ def init_db() -> None:
     cur.execute('INSERT OR IGNORE INTO sync_state(id) VALUES (1)')
     conn.commit()
     
-    # Seed one doctor per specialty from DOCTORS config (first entry only)
+    # Seed ALL doctors per specialty from DOCTORS config
     for specialty, names in DOCTORS.items():
         if not names:
             continue
-        name = names[0]
-        cur.execute(
-            '''INSERT OR IGNORE INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration)
-               VALUES (?, ?, ?, ?, ?)''',
-            (name, specialty, WORKING_HOURS_START, WORKING_HOURS_END, SLOT_DURATION)
-        )
+        for name in names:
+            cur.execute(
+                '''INSERT OR IGNORE INTO doctors(name, specialty, working_hours_start, working_hours_end, slot_duration)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (name, specialty, WORKING_HOURS_START, WORKING_HOURS_END, SLOT_DURATION)
+            )
     conn.commit()
     conn.close()
 
@@ -311,6 +311,7 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                 calendarId=CALENDAR_ID,
                 timeMin=time_min,
                 timeMax=time_max,
+                showDeleted=True,
                 singleEvents=True,
                 orderBy='startTime',
                 pageToken=page_token
@@ -325,7 +326,7 @@ def sync_if_stale(max_age_seconds: int = 60) -> None:
                     doctor_name = summary[summary.find('[')+1:summary.find(']')]
                 doctor_id = get_doctor_id_by_name(doctor_name) if doctor_name else None
                 if doctor_id is None:
-                    # Unknown doctor; skip in MVP
+                    # Skip events that don't map to a known doctor for this MVP
                     continue
                 phone = _parse_phone_from_description(description) or ''
                 patient_name = _parse_patient_name_from_description(description)
@@ -516,6 +517,76 @@ def get_available_slots(date: str, specialty: str | None = None):
         current_time += timedelta(minutes=SLOT_DURATION)
 
     return available_slots
+
+
+def get_doctor_availability_slots(doctor_id: int, date: str) -> list[str]:
+    """Return available HH:MM slots for a specific doctor on a given date (YYYY-MM-DD).
+
+    Uses working hours and SLOT_DURATION; excludes any confirmed appointments for the doctor.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    # Fetch doctor working hours; default to global if missing
+    cur.execute('SELECT working_hours_start, working_hours_end FROM doctors WHERE id=?', (doctor_id,))
+    row = cur.fetchone()
+    if row:
+        start_hour = row['working_hours_start'] if row['working_hours_start'] is not None else WORKING_HOURS_START
+        end_hour = row['working_hours_end'] if row['working_hours_end'] is not None else WORKING_HOURS_END
+    else:
+        start_hour, end_hour = WORKING_HOURS_START, WORKING_HOURS_END
+
+    # Build all candidate slots in IST
+    slots: list[str] = []
+    current_time = datetime.strptime(f"{date} {start_hour:02d}:00", "%Y-%m-%d %H:%M")
+    end_time = datetime.strptime(f"{date} {end_hour:02d}:00", "%Y-%m-%d %H:%M")
+    while current_time < end_time:
+        slots.append(current_time.strftime("%H:%M"))
+        current_time += timedelta(minutes=SLOT_DURATION)
+
+    # Fetch existing confirmed appts for doctor on that day
+    day_start_ist = datetime.strptime(f"{date} 00:00", "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    day_end_ist = day_start_ist + timedelta(days=1)
+    # Convert to UTC ISO for comparison with DB timestamps
+    day_start_utc = day_start_ist.astimezone(timezone.utc).isoformat()
+    day_end_utc = day_end_ist.astimezone(timezone.utc).isoformat()
+    cur.execute(
+        '''SELECT start_ts_utc, end_ts_utc FROM appointments
+           WHERE doctor_id=? AND status='confirmed'
+             AND NOT (end_ts_utc <= ? OR start_ts_utc >= ?)''',
+        (doctor_id, day_start_utc, day_end_utc)
+    )
+    appts = cur.fetchall()
+    conn.close()
+
+    # Build a set of blocked minutes ranges in IST
+    blocked: list[tuple[datetime, datetime]] = []
+    ist = ZoneInfo("Asia/Kolkata")
+    for a in appts:
+        try:
+            s = datetime.fromisoformat(a['start_ts_utc'])
+            e = datetime.fromisoformat(a['end_ts_utc'])
+            if s.tzinfo is None:
+                s = s.replace(tzinfo=timezone.utc)
+            if e.tzinfo is None:
+                e = e.replace(tzinfo=timezone.utc)
+            blocked.append((s.astimezone(ist), e.astimezone(ist)))
+        except Exception:
+            continue
+
+    # Filter candidate slots by overlap with blocked intervals
+    available: list[str] = []
+    for t in slots:
+        start_local = datetime.strptime(f"{date} {t}", "%Y-%m-%d %H:%M").replace(tzinfo=ist)
+        end_local = start_local + timedelta(minutes=SLOT_DURATION)
+        conflict = False
+        for (bs, be) in blocked:
+            if not (end_local <= bs or start_local >= be):
+                conflict = True
+                break
+        if not conflict:
+            available.append(t)
+
+    return available
 
 
 def find_event_by_id(event_id: str):

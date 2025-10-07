@@ -207,6 +207,18 @@ def test_manage_reschedule() -> None:
         print(f"Request failed: {e}")
 
 
+def test_doctor_availability() -> None:
+    print("\n-- Test: Doctor Availability --")
+    doctor_id = input_or_default("Doctor ID (1-6)", "1")
+    date = input_or_default("Date (YYYY-MM-DD)", datetime.now().strftime("%Y-%m-%d"))
+    url = f"{BASE_URL}/api/availability/doctor"
+    try:
+        resp = requests.get(url, params={"doctor_id": doctor_id, "date": date}, timeout=15)
+        print_response(resp)
+    except Exception as e:
+        print(f"Request failed: {e}")
+
+
 def main() -> None:
     menu = textwrap.dedent(
         """
@@ -219,6 +231,7 @@ def main() -> None:
         5) Get appointments by phone
         6) Manage appointment - delete
         7) Manage appointment - reschedule
+        8) Check doctor availability
         q) Quit
         """
     )
@@ -248,6 +261,8 @@ def main() -> None:
             test_manage_delete()
         elif choice == "7":
             test_manage_reschedule()
+        elif choice == "8":
+            test_doctor_availability()
         elif choice in {"q", "quit", "exit"}:
             print("Bye!")
             sys.exit(0)

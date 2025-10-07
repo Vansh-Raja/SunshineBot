@@ -1,0 +1,40 @@
+{
+  "type": "webhook",
+  "name": "check_doctor_availability",
+  "description": "Get available time slots for a doctor on a given date (IST). Use this before booking or when the caller asks about availability.",
+  "disable_interruptions": false,
+  "force_pre_tool_speech": "auto",
+  "assignments": [],
+  "api_schema": {
+    "url": "https://sunshine.vanshraja.me/api/availability/doctor",
+    "method": "GET",
+    "path_params_schema": [],
+    "query_params_schema": [
+      {
+        "id": "doctor_id",
+        "type": "string",
+        "value_type": "llm_prompt",
+        "description": "Numeric doctor ID (1-6)",
+        "dynamic_variable": "",
+        "constant_value": "",
+        "enum": ["1", "2", "3", "4", "5", "6"],
+        "required": true
+      },
+      {
+        "id": "date",
+        "type": "string",
+        "value_type": "llm_prompt",
+        "description": "Date in YYYY-MM-DD (IST)",
+        "dynamic_variable": "",
+        "constant_value": "",
+        "enum": null,
+        "required": true
+      }
+    ],
+    "request_body_schema": null,
+    "request_headers": [],
+    "auth_connection": null
+  },
+  "response_timeout_secs": 20,
+  "dynamic_variables": {"dynamic_variable_placeholders": {}}
+}
